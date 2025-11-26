@@ -45,7 +45,7 @@ def extract_svo_frames(svo_path, output_dir, sample_rate=10):
     runtime.confidence_threshold = 0  # 모든 depth 데이터 가져오기
     runtime.texture_confidence_threshold = 0
     runtime.enable_depth = True  # 명시적으로 depth 활성화
-    runtime.enable_fill_mode = True  # 원본 데이터 유지
+    runtime.enable_fill_mode = False  # 원본 데이터 유지
     
     image_left = sl.Mat()
     depth_map = sl.Mat()
@@ -108,8 +108,8 @@ def extract_svo_frames(svo_path, output_dir, sample_rate=10):
             depth_uint16 = np.clip(depth_valid, 0, 65535).astype(np.uint16)
             np.save(f"{output_dir}/depth/{frame_id}.npy", depth_uint16)
             
-            # Confidence 저장 (0-255 범위, uint8로 충분)
-            confidence_uint8 = np.clip(confidence, 0, 255).astype(np.uint8)
+            # Confidence 저장 
+            confidence_uint8 = confidence.astype(np.uint8)
             np.save(f"{output_dir}/confidence/{frame_id}.npy", confidence_uint8)
             
             # Confidence 시각화
