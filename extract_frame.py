@@ -91,7 +91,7 @@ def extract_svo_frames(svo_path, output_dir, sample_rate=10):
                     valid_depth = depth[valid_mask]
                     print(f"  Min: {valid_depth.min()/1000:.2f}m, Max: {valid_depth.max()/1000:.2f}m, Mean: {valid_depth.mean()/1000:.2f}m")
                 
-                # 첫 프레임에서 Confidence 범위 확인
+                # 첫 프레임에서 Confidence 범위 확인(0~1인지, 0~100인지 확인)
                 if saved_count == 0:
                     print(f"  Confidence 범위: {confidence.min():.1f} ~ {confidence.max():.1f}")
             

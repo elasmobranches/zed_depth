@@ -6,7 +6,7 @@
 
 - **DA3-Mono (Monocular)**: 상대 깊이 추정 모델
 - **DA3-Metric**: 절대 깊이 추정 모델
-
+huggingface 주소 `https://huggingface.co/depth-anything`
 평가는 **ZED 카메라의 깊이 맵을 Ground Truth**로 사용하여 수행됩니다.
 
 

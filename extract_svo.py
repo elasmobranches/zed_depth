@@ -7,6 +7,7 @@ import numpy as np
 from datetime import datetime
 import signal
 
+# ENABLE_DISPLAY = True 일 때, 라이브 디스플레이 활성화, SSH가 아닌 Orin에서 진행시 사용가능
 ENABLE_DISPLAY = False
 zed = None
 recording_active = False
@@ -81,8 +82,8 @@ def main():
     
     # Runtime 파라미터 - confidence 값 수정
     runtime = sl.RuntimeParameters()
-    runtime.confidence_threshold = 0  
-    runtime.texture_confidence_threshold = 0 
+    runtime.confidence_threshold = 0   # 신뢰하지 못하는 픽셀 값 0 
+    runtime.texture_confidence_threshold = 0  #텍스처가 없는 영역 픽셀 값 0
     runtime.enable_depth = True
     runtime.enable_fill_mode = True  # Depth hole filling 활성화
     

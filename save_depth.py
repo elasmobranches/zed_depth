@@ -1,6 +1,7 @@
 """
 RGB 이미지에 대한 depth를 저장하는 스크립트
 Depth-Anything-3 모델을 사용하여 depth estimation을 수행하고 결과를 저장합니다.
+사용하려면 Depth-Anything-3 모델을 설치해야 합니다.
 """
 
 import torch
