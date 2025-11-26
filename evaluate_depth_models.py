@@ -1,23 +1,33 @@
 """
-Depth Anything v3 모델 평가 스크립트
+Depth Anything v3 모델 평가 스크립트 
 ZED depth를 ground truth로 사용하여 상대/절대 깊이 추정 모델을 평가합니다.
+
+개선사항:
+- 거리별 silog, spearman 추가
+- 거리별 delta_2, delta_3 추가
+- 코드 구조 개선
 """
 
 import numpy as np
 import cv2
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
-import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy.stats import spearmanr
-from scipy.optimize import least_squares
-import pandas as pd
+from typing import Dict, List, Tuple, Optional, Any
 import json
 from tqdm import tqdm
+from scipy.stats import spearmanr
 
 
 class DepthEvaluationFramework:
     """Depth 모델 평가 프레임워크"""
+    
+    # 클래스 상수
+    DISTANCE_RANGES = [
+        (0, 1000),      # 0-1m
+        (1000, 2000),   # 1-2m
+        (2000, 5000),   # 2-5m
+        (5000, 10000),  # 5-10m
+        (10000, 20000)  # 10-20m
+    ]
     
     def __init__(
         self,
@@ -33,10 +43,9 @@ class DepthEvaluationFramework:
             zed_dir: ZED depth npy 파일이 있는 디렉토리
             rel_dir: 상대 깊이 추정 결과 디렉토리
             abs_dir: 절대 깊이 추정 결과 디렉토리
-            confidence_threshold: ZED confidence threshold (0.0-1.0)
+            confidence_threshold: ZED confidence threshold (0.0-100.0)
             max_distance: 최대 거리 (mm)
             min_distance: 최소 거리 (mm)
-            최대, 최소 거리는 ZED 2i에서 사용한 설정 값
         """
         self.zed_dir = Path(zed_dir) / "depth_npy"
         self.rel_dir = Path(rel_dir) / "depth_npy"
@@ -48,7 +57,7 @@ class DepthEvaluationFramework:
         
         # 결과 저장용
         self.results = {}
-        
+    
     def load_depth_maps(self) -> Dict[str, List[np.ndarray]]:
         """모든 depth map과 confidence map 로드"""
         print("Depth maps 로딩 중...")
@@ -56,8 +65,7 @@ class DepthEvaluationFramework:
         # 파일 목록 가져오기
         zed_files = sorted(self.zed_dir.glob("*.npy"))
         
-        # Confidence 디렉토리 확인 (depth_npy와 같은 레벨에 confidence_npy가 있을 수 있음)
-        # Confidence map이 없어도 정상 동작합니다 (confidence_threshold는 무시됨)
+        # Confidence 디렉토리 확인
         confidence_dir = self.zed_dir.parent / "confidence"
         has_confidence = confidence_dir.exists()
         
@@ -69,8 +77,7 @@ class DepthEvaluationFramework:
         rel_depths = []
         abs_depths = []
         
-        for zed_file in tqdm(zed_files):
-            # ZED 파일 이름에서 인덱스 추출 (예: 000000.npy -> 000000)
+        for zed_file in tqdm(zed_files, desc="파일 로딩"):
             idx = zed_file.stem
             
             # ZED depth 로드
@@ -83,7 +90,8 @@ class DepthEvaluationFramework:
                 if conf_file.exists():
                     zed_conf = np.load(conf_file)
                     zed_confidences.append(zed_conf)
-                
+                else:
+                    zed_confidences.append(None)
             else:
                 zed_confidences.append(None)
             
@@ -94,7 +102,7 @@ class DepthEvaluationFramework:
                 rel_depths.append(rel_depth)
             else:
                 rel_depths.append(None)
-                print(f"상대 깊이 파일을 찾을 수 없습니다: {rel_file}")
+                print(f"  ⚠ 상대 깊이 파일 없음: {rel_file}")
             
             # 절대 깊이 로드
             abs_file = self.abs_dir / f"{idx}_depth.npy"
@@ -103,7 +111,9 @@ class DepthEvaluationFramework:
                 abs_depths.append(abs_depth)
             else:
                 abs_depths.append(None)
-                print(f"절대 깊이 파일을 찾을 수 없습니다: {abs_file}")
+                print(f"  ⚠ 절대 깊이 파일 없음: {abs_file}")
+        
+        print(f"  ✓ {len(zed_depths)}개 파일 로드 완료")
         
         return {
             'zed': zed_depths,
@@ -136,53 +146,49 @@ class DepthEvaluationFramework:
         Least squares로 depth alignment 수행
         
         aligned_pred = scale * pred + shift ≈ gt
-        상대 깊이와 GT간의 픽셀 관계가 *선형 이라고 가정한다.
-
-        Args:
-            pred_depth: 예측 depth
-            gt_depth: Ground truth depth
-            valid_mask: 유효한 픽셀 마스크
-            method: 'scale_shift' 또는 'scale_only'
-        
-        Returns:
-            aligned_depth: pred_depth를 변환한 결과
-            scale: 스케일 팩터
-            shift: 시프트 값
         """
         pred_valid = pred_depth[valid_mask].flatten()
         gt_valid = gt_depth[valid_mask].flatten()
         
         if method == 'scale_shift':
-            # 목표: aligned_pred = scale * pred + shift ≈ gt
-            # 최소화: ||scale * pred + shift - gt||^2
             A = np.vstack([pred_valid, np.ones(len(pred_valid))]).T
             b = gt_valid
             x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
             scale, shift = x[0], x[1]
-            
-            aligned = scale * pred_depth + shift  # pred_depth에 적용
-    
+            aligned = scale * pred_depth + shift
         else:
             raise ValueError(f"Invalid method: {method}")
+        
         return aligned, scale, shift
+    
+    # ==================== 메트릭 계산 함수들 ====================
     
     def compute_abs_rel(self, pred: np.ndarray, gt: np.ndarray, mask: np.ndarray) -> float:
         """Absolute Relative Error"""
         pred_valid = pred[mask]
         gt_valid = gt[mask]
-        return np.mean(np.abs(pred_valid - gt_valid) / (gt_valid + 1e-8))
+        return float(np.mean(np.abs(pred_valid - gt_valid) / (gt_valid + 1e-8)))
     
     def compute_rmse(self, pred: np.ndarray, gt: np.ndarray, mask: np.ndarray) -> float:
         """Root Mean Squared Error"""
         pred_valid = pred[mask]
         gt_valid = gt[mask]
-        return np.sqrt(np.mean((pred_valid - gt_valid) ** 2))
+        return float(np.sqrt(np.mean((pred_valid - gt_valid) ** 2)))
     
     def compute_rmse_log(self, pred: np.ndarray, gt: np.ndarray, mask: np.ndarray) -> float:
         """Root Mean Squared Error in log space"""
         pred_valid = pred[mask]
         gt_valid = gt[mask]
-        return np.sqrt(np.mean((np.log(pred_valid + 1e-8) - np.log(gt_valid + 1e-8)) ** 2))
+        # 음수 방지
+        pred_valid = np.maximum(pred_valid, 1e-8)
+        gt_valid = np.maximum(gt_valid, 1e-8)
+        return float(np.sqrt(np.mean((np.log(pred_valid) - np.log(gt_valid)) ** 2)))
+    
+    def compute_mae(self, pred: np.ndarray, gt: np.ndarray, mask: np.ndarray) -> float:
+        """Mean Absolute Error"""
+        pred_valid = pred[mask]
+        gt_valid = gt[mask]
+        return float(np.mean(np.abs(pred_valid - gt_valid)))
     
     def compute_delta_accuracy(
         self, 
@@ -194,18 +200,40 @@ class DepthEvaluationFramework:
         """Delta accuracy (δ < threshold)"""
         pred_valid = pred[mask]
         gt_valid = gt[mask]
-        ratio = np.maximum(pred_valid / (gt_valid + 1e-8), gt_valid / (pred_valid + 1e-8))
-        return np.mean(ratio < threshold)
+        # 음수 방지
+        pred_valid = np.maximum(pred_valid, 1e-8)
+        gt_valid = np.maximum(gt_valid, 1e-8)
+        ratio = np.maximum(pred_valid / gt_valid, gt_valid / pred_valid)
+        return float(np.mean(ratio < threshold))
+    
+    def compute_silog(self, pred: np.ndarray, gt: np.ndarray, mask: np.ndarray) -> Optional[float]:
+        """Scale-Invariant Logarithmic Error"""
+        pred_valid = pred[mask]
+        gt_valid = gt[mask]
+        
+        if len(pred_valid) < 10:  # 너무 적으면 계산 안 함
+            return None
+        
+        # 음수 방지
+        pred_valid = np.maximum(pred_valid, 1e-8)
+        gt_valid = np.maximum(gt_valid, 1e-8)
+        
+        log_diff = np.log(pred_valid) - np.log(gt_valid)
+        silog = np.sqrt(np.mean(log_diff ** 2) - (np.mean(log_diff) ** 2))
+        return float(silog)
     
     def compute_spearman_correlation(
         self, 
         pred: np.ndarray, 
         gt: np.ndarray, 
         mask: np.ndarray
-    ) -> float:
+    ) -> Optional[float]:
         """Spearman rank correlation"""
         pred_valid = pred[mask]
         gt_valid = gt[mask]
+        
+        if len(pred_valid) < 10:  # 너무 적으면 계산 안 함
+            return None
         
         # 샘플링 (너무 많으면)
         if len(pred_valid) > 100000:
@@ -214,56 +242,59 @@ class DepthEvaluationFramework:
             gt_valid = gt_valid[indices]
         
         corr, _ = spearmanr(pred_valid, gt_valid)
-        return corr
+        return float(corr) if not np.isnan(corr) else None
     
-    def compute_silog(self, pred: np.ndarray, gt: np.ndarray, mask: np.ndarray) -> float:
-        """Scale-Invariant Logarithmic Error"""
-        pred_valid = pred[mask]
-        gt_valid = gt[mask]
-        
-        log_diff = np.log(pred_valid + 1e-8) - np.log(gt_valid + 1e-8)
-        return np.sqrt(np.mean(log_diff ** 2) - (np.mean(log_diff) ** 2))
-    
-    def compute_mae(self, pred: np.ndarray, gt: np.ndarray, mask: np.ndarray) -> float:
-        """Mean Absolute Error"""
-        pred_valid = pred[mask]
-        gt_valid = gt[mask]
-        return np.mean(np.abs(pred_valid - gt_valid))
+    # ==================== 거리별 분석 ====================
     
     def analyze_by_distance_ranges(
         self,
         pred: np.ndarray,
         gt: np.ndarray,
-        mask: np.ndarray,
-        ranges: List[Tuple[float, float]]
+        mask: np.ndarray
     ) -> Dict[str, Dict]:
-        """거리별 성능 분석"""
+        """거리별 성능 분석 (모든 메트릭 포함)"""
         results = {}
         
-        for min_dist, max_dist in ranges:
+        for min_dist, max_dist in self.DISTANCE_RANGES:
             range_mask = mask & (gt >= min_dist) & (gt < max_dist)
+            num_pixels = int(range_mask.sum())
             
-            if range_mask.sum() < 100:  # 충분한 픽셀이 없으면 스킵
+            range_key = f"{min_dist/1000:.1f}-{max_dist/1000:.1f}m"
+            
+            if num_pixels < 100:  # 충분한 픽셀이 없으면 스킵
                 continue
             
-            results[f"{min_dist/1000:.1f}-{max_dist/1000:.1f}m"] = {
+            # 모든 메트릭 계산
+            results[range_key] = {
+                # 기본 메트릭
                 'abs_rel': self.compute_abs_rel(pred, gt, range_mask),
                 'rmse': self.compute_rmse(pred, gt, range_mask),
                 'mae': self.compute_mae(pred, gt, range_mask),
+                
+                # Delta accuracies
                 'delta_1': self.compute_delta_accuracy(pred, gt, range_mask, 1.25),
-                'num_pixels': range_mask.sum()
+                'delta_2': self.compute_delta_accuracy(pred, gt, range_mask, 1.25**2),
+                'delta_3': self.compute_delta_accuracy(pred, gt, range_mask, 1.25**3),
+                
+                # Scale-invariant 메트릭
+                'silog': self.compute_silog(pred, gt, range_mask),
+                'spearman': self.compute_spearman_correlation(pred, gt, range_mask),
+                
+                # 메타 정보
+                'num_pixels': num_pixels
             }
         
         return results
+    
+    # ==================== 모델별 평가 ====================
     
     def evaluate_relative_depth_model(
         self,
         rel_depth: np.ndarray,
         zed_depth: np.ndarray,
         valid_mask: np.ndarray
-    ) -> Dict:
+    ) -> Tuple[Dict, np.ndarray]:
         """상대 깊이 모델 평가"""
-        print("상대 깊이 모델 평가 중...")
         
         # 해상도 맞추기
         if rel_depth.shape != zed_depth.shape:
@@ -277,7 +308,7 @@ class DepthEvaluationFramework:
         
         metrics = {}
         
-        # 1. Scale-invariant 메트릭 (alignment 전)
+        # 1. Scale-invariant 메트릭 (alignment 전, 전체 이미지)
         metrics['scale_invariant'] = {
             'spearman': self.compute_spearman_correlation(rel_depth_resized, zed_depth, valid_mask),
             'silog': self.compute_silog(rel_depth_resized, zed_depth, valid_mask),
@@ -293,7 +324,7 @@ class DepthEvaluationFramework:
             'shift_factor': float(shift)
         }
         
-        # 3. Alignment 후 메트릭
+        # 3. Alignment 후 메트릭 (전체 이미지)
         metrics['after_alignment'] = {
             'abs_rel': self.compute_abs_rel(aligned_rel, zed_depth, valid_mask),
             'rmse': self.compute_rmse(aligned_rel, zed_depth, valid_mask),
@@ -304,16 +335,9 @@ class DepthEvaluationFramework:
             'delta_3': self.compute_delta_accuracy(aligned_rel, zed_depth, valid_mask, 1.25**3),
         }
         
-        # 4. 거리별 분석
-        distance_ranges = [
-            (0, 1000),      # 0-1m
-            (1000, 2000),   # 1-2m
-            (2000, 5000),   # 2-5m
-            (5000, 10000),  # 5-10m
-            (10000, 20000)  # 10-20m
-        ]
+        # 4. 거리별 분석 (모든 메트릭 포함)
         metrics['distance_analysis'] = self.analyze_by_distance_ranges(
-            aligned_rel, zed_depth, valid_mask, distance_ranges
+            aligned_rel, zed_depth, valid_mask
         )
         
         return metrics, aligned_rel
@@ -323,9 +347,8 @@ class DepthEvaluationFramework:
         abs_depth: np.ndarray,
         zed_depth: np.ndarray,
         valid_mask: np.ndarray
-    ) -> Dict:
+    ) -> Tuple[Dict, np.ndarray]:
         """절대 깊이 모델 평가"""
-        print("절대 깊이 모델 평가 중...")
         
         # 해상도 맞추기
         if abs_depth.shape != zed_depth.shape:
@@ -337,22 +360,19 @@ class DepthEvaluationFramework:
         else:
             abs_depth_resized = abs_depth.copy()
         
-        # 절대 깊이는 보통 미터 단위이므로 밀리미터로 변환
-        # (ZED는 mm 단위라고 가정)
-        # 만약 이미 mm 단위라면 변환 불필요
-        # 여기서는 값의 범위를 보고 자동 판단
+        # 단위 변환 (미터 → 밀리미터)
         if abs_depth_resized.max() < 100:  # 미터 단위로 보임
-            abs_depth_resized = abs_depth_resized * 1000  # m -> mm
+            abs_depth_resized = abs_depth_resized * 1000
         
         metrics = {}
         
-        # 1. Scale-invariant 메트릭 (alignment 없이 직접 비교)
+        # 1. Scale-invariant 메트릭 (전체 이미지)
         metrics['scale_invariant'] = {
             'spearman': self.compute_spearman_correlation(abs_depth_resized, zed_depth, valid_mask),
             'silog': self.compute_silog(abs_depth_resized, zed_depth, valid_mask),
         }
         
-        # 2. 직접 비교 (alignment 없이)
+        # 2. 직접 비교 (alignment 없이, 전체 이미지)
         metrics['direct_comparison'] = {
             'abs_rel': self.compute_abs_rel(abs_depth_resized, zed_depth, valid_mask),
             'rmse': self.compute_rmse(abs_depth_resized, zed_depth, valid_mask),
@@ -363,19 +383,12 @@ class DepthEvaluationFramework:
             'delta_3': self.compute_delta_accuracy(abs_depth_resized, zed_depth, valid_mask, 1.25**3),
         }
         
-        # 3. Scale drift 분석 (거리에 따른 스케일 변화)
+        # 3. Scale drift 분석
         metrics['scale_drift'] = self.analyze_scale_drift(abs_depth_resized, zed_depth, valid_mask)
         
-        # 4. 거리별 분석
-        distance_ranges = [
-            (0, 1000),      # 0-1m
-            (1000, 2000),   # 1-2m
-            (2000, 5000),   # 2-5m
-            (5000, 10000),  # 5-10m
-            (10000, 20000)  # 10-20m
-        ]
+        # 4. 거리별 분석 (모든 메트릭 포함)
         metrics['distance_analysis'] = self.analyze_by_distance_ranges(
-            abs_depth_resized, zed_depth, valid_mask, distance_ranges
+            abs_depth_resized, zed_depth, valid_mask
         )
         
         return metrics, abs_depth_resized
@@ -393,11 +406,10 @@ class DepthEvaluationFramework:
         for i in range(len(distance_bins) - 1):
             range_mask = mask & (gt >= distance_bins[i]) & (gt < distance_bins[i+1])
             
-            if range_mask.sum() > 100:  # 충분한 픽셀이 있을 때만
+            if range_mask.sum() > 100:
                 pred_valid = pred[range_mask]
                 gt_valid = gt[range_mask]
                 
-                # Median ratio로 스케일 계산
                 ratio = gt_valid / (pred_valid + 1e-8)
                 scale = np.median(ratio)
                 
@@ -409,6 +421,8 @@ class DepthEvaluationFramework:
                 })
         
         return scale_factors
+    
+    # ==================== 전체 평가 ====================
     
     def evaluate_all(self) -> Dict:
         """전체 평가 수행"""
@@ -425,24 +439,23 @@ class DepthEvaluationFramework:
         # 각 이미지에 대해 평가
         for idx in tqdm(range(len(depth_maps['zed'])), desc="이미지 평가"):
             zed_depth = depth_maps['zed'][idx]
-            zed_confidence = depth_maps.get('zed_conf', [None] * len(depth_maps['zed']))[idx]
+            zed_confidence = depth_maps['zed_conf'][idx]
             rel_depth = depth_maps['rel'][idx]
             abs_depth = depth_maps['abs'][idx]
-
+            
             if zed_depth is None:
-                print(f"ZED depth 파일을 찾을 수 없습니다: {idx}")
                 continue
             
-            # Valid mask 생성 (confidence 포함)
+            # Valid mask 생성
             valid_mask = self.create_valid_mask(zed_depth, zed_confidence)
             
-            if valid_mask.sum() < 100:  # 유효한 픽셀이 너무 적으면 스킵
-                print(f"유효한 픽셀이 너무 적습니다: {idx}")
+            if valid_mask.sum() < 100:
+                print(f"  ⚠ 유효 픽셀 부족: {idx}")
                 continue
             
             # 상대 깊이 평가
             if rel_depth is not None:
-                rel_metrics, aligned_rel = self.evaluate_relative_depth_model(
+                rel_metrics, _ = self.evaluate_relative_depth_model(
                     rel_depth, zed_depth, valid_mask
                 )
                 rel_metrics['image_idx'] = idx
@@ -450,7 +463,7 @@ class DepthEvaluationFramework:
             
             # 절대 깊이 평가
             if abs_depth is not None:
-                abs_metrics, aligned_abs = self.evaluate_metric_depth_model(
+                abs_metrics, _ = self.evaluate_metric_depth_model(
                     abs_depth, zed_depth, valid_mask
                 )
                 abs_metrics['image_idx'] = idx
@@ -467,7 +480,10 @@ class DepthEvaluationFramework:
         
         # 비교 분석
         if all_rel_metrics and all_abs_metrics:
-            results['comparison'] = self.compare_models(all_rel_metrics, all_abs_metrics)
+            results['comparison'] = self.compare_models(
+                results.get('relative', {}),
+                results.get('absolute', {})
+            )
         
         self.results = results
         return results
@@ -492,7 +508,8 @@ class DepthEvaluationFramework:
             for flat_dict in flattened_list:
                 val = flat_dict.get(key)
                 if val is not None and isinstance(val, (int, float, np.number)):
-                    values.append(float(val))
+                    if not np.isnan(val) and not np.isinf(val):
+                        values.append(float(val))
             
             if values:
                 aggregated[key] = {
@@ -508,53 +525,42 @@ class DepthEvaluationFramework:
         """딕셔너리를 평탄화"""
         items = []
         for k, v in d.items():
-            if k == 'image_idx':  # image_idx는 제외
+            if k == 'image_idx':
                 continue
             new_key = f"{parent_key}{sep}{k}" if parent_key else k
             if isinstance(v, dict):
                 items.extend(self._flatten_dict(v, new_key, sep=sep).items())
+            elif isinstance(v, list):
+                # scale_drift 같은 리스트는 스킵
+                continue
             elif isinstance(v, (int, float, np.number)):
                 items.append((new_key, float(v)))
+            elif v is None:
+                # None 값도 저장 (나중에 필터링)
+                items.append((new_key, None))
         return dict(items)
     
-    def compare_models(self, rel_metrics: List[Dict], abs_metrics: List[Dict]) -> Dict:
+    def compare_models(self, rel_agg: Dict, abs_agg: Dict) -> Dict:
         """두 모델 비교"""
-        comparison = {}
         
-        # 주요 메트릭 비교
-        rel_agg = self.aggregate_metrics(rel_metrics)
-        abs_agg = self.aggregate_metrics(abs_metrics)
-        
-        def get_nested_mean(agg_dict, key_path):
-            """중첩된 딕셔너리에서 mean 값 가져오기
-            JSON이 평탄화되어 있으므로 (예: "after_alignment.abs_rel": {"mean": ...})
-            key_path가 "after_alignment.abs_rel" 형태일 때 올바르게 처리
-            """
-            # 직접 키로 찾기 (평탄화된 구조)
-            if key_path in agg_dict:
-                val = agg_dict[key_path]
-                if isinstance(val, dict) and 'mean' in val:
-                    return val['mean']
-            
-            # 중첩된 구조 시도
-            keys = key_path.split('.')
-            val = agg_dict
-            for k in keys:
-                if isinstance(val, dict) and k in val:
-                    val = val[k]
-                else:
-                    return None
-            if isinstance(val, dict) and 'mean' in val:
-                return val['mean']
+        def get_mean(agg_dict: Dict, key: str) -> Optional[float]:
+            if key in agg_dict and isinstance(agg_dict[key], dict):
+                return agg_dict[key].get('mean')
             return None
         
-        comparison['summary'] = {
-            'relative_abs_rel': get_nested_mean(rel_agg, 'after_alignment.abs_rel'),
-            'absolute_abs_rel': get_nested_mean(abs_agg, 'direct_comparison.abs_rel'),
-            'relative_rmse': get_nested_mean(rel_agg, 'after_alignment.rmse'),
-            'absolute_rmse': get_nested_mean(abs_agg, 'direct_comparison.rmse'),
-            'relative_delta_1': get_nested_mean(rel_agg, 'after_alignment.delta_1'),
-            'absolute_delta_1': get_nested_mean(abs_agg, 'direct_comparison.delta_1'),
+        comparison = {
+            'summary': {
+                'relative_abs_rel': get_mean(rel_agg, 'after_alignment.abs_rel'),
+                'absolute_abs_rel': get_mean(abs_agg, 'direct_comparison.abs_rel'),
+                'relative_rmse': get_mean(rel_agg, 'after_alignment.rmse'),
+                'absolute_rmse': get_mean(abs_agg, 'direct_comparison.rmse'),
+                'relative_delta_1': get_mean(rel_agg, 'after_alignment.delta_1'),
+                'absolute_delta_1': get_mean(abs_agg, 'direct_comparison.delta_1'),
+                'relative_silog': get_mean(rel_agg, 'scale_invariant.silog'),
+                'absolute_silog': get_mean(abs_agg, 'scale_invariant.silog'),
+                'relative_spearman': get_mean(rel_agg, 'scale_invariant.spearman'),
+                'absolute_spearman': get_mean(abs_agg, 'scale_invariant.spearman'),
+            }
         }
         
         return comparison
@@ -564,8 +570,7 @@ class DepthEvaluationFramework:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        # JSON으로 저장
-        def convert_to_serializable(obj):
+        def convert_to_serializable(obj: Any) -> Any:
             if isinstance(obj, np.ndarray):
                 return obj.tolist()
             elif isinstance(obj, (np.integer, np.floating)):
@@ -579,7 +584,7 @@ class DepthEvaluationFramework:
         with open(output_path / 'evaluation_results.json', 'w', encoding='utf-8') as f:
             json.dump(convert_to_serializable(self.results), f, indent=2, ensure_ascii=False)
         
-        print(f"\n결과가 {output_path / 'evaluation_results.json'}에 저장되었습니다.")
+        print(f"\n✓ 결과 저장: {output_path / 'evaluation_results.json'}")
     
     def print_summary(self):
         """요약 출력"""
@@ -587,94 +592,80 @@ class DepthEvaluationFramework:
         print("평가 결과 요약")
         print("=" * 60)
         
-        def get_nested_value(d, key_path, default=None):
-            """중첩된 딕셔너리에서 값 가져오기"""
-            keys = key_path.split('.')
-            val = d
-            for k in keys:
-                if isinstance(val, dict) and k in val:
-                    val = val[k]
-                else:
-                    return default
-            return val
+        def get_val(d: Dict, key: str) -> Tuple[Optional[float], Optional[float]]:
+            """mean, std 값 가져오기"""
+            if key in d and isinstance(d[key], dict):
+                return d[key].get('mean'), d[key].get('std')
+            return None, None
+        
+        def fmt(mean: Optional[float], std: Optional[float], suffix: str = '') -> str:
+            if mean is None:
+                return "N/A"
+            if std is not None:
+                return f"{mean:.4f} ± {std:.4f}{suffix}"
+            return f"{mean:.4f}{suffix}"
+        
+        def fmt_comp(val: Optional[float], decimals: int = 4, suffix: str = '') -> str:
+            """비교용 포맷팅"""
+            if val is None:
+                return "N/A"
+            if decimals == 2:
+                return f"{val:.2f}{suffix}"
+            return f"{val:.4f}{suffix}"
         
         if 'relative' in self.results:
             print("\n[상대 깊이 모델 (DA3-Mono)]")
             rel = self.results['relative']
             
-            abs_rel_mean = get_nested_value(rel, 'after_alignment.abs_rel.mean')
-            abs_rel_std = get_nested_value(rel, 'after_alignment.abs_rel.std')
-            if abs_rel_mean is not None:
-                print(f"  AbsRel: {abs_rel_mean:.4f} ± {abs_rel_std:.4f}" if abs_rel_std is not None else f"  AbsRel: {abs_rel_mean:.4f}")
+            m, s = get_val(rel, 'after_alignment.abs_rel')
+            print(f"  AbsRel: {fmt(m, s)}")
             
-            rmse_mean = get_nested_value(rel, 'after_alignment.rmse.mean')
-            rmse_std = get_nested_value(rel, 'after_alignment.rmse.std')
-            if rmse_mean is not None:
-                print(f"  RMSE: {rmse_mean:.2f} ± {rmse_std:.2f} mm" if rmse_std is not None else f"  RMSE: {rmse_mean:.2f} mm")
+            m, s = get_val(rel, 'after_alignment.rmse')
+            print(f"  RMSE: {fmt(m, s, ' mm')}")
             
-            delta_mean = get_nested_value(rel, 'after_alignment.delta_1.mean')
-            delta_std = get_nested_value(rel, 'after_alignment.delta_1.std')
-            if delta_mean is not None:
-                print(f"  δ1: {delta_mean:.4f} ± {delta_std:.4f}" if delta_std is not None else f"  δ1: {delta_mean:.4f}")
+            m, s = get_val(rel, 'after_alignment.delta_1')
+            print(f"  δ1: {fmt(m, s)}")
             
-            spearman_mean = get_nested_value(rel, 'scale_invariant.spearman.mean')
-            spearman_std = get_nested_value(rel, 'scale_invariant.spearman.std')
-            if spearman_mean is not None:
-                print(f"  Spearman: {spearman_mean:.4f} ± {spearman_std:.4f}" if spearman_std is not None else f"  Spearman: {spearman_mean:.4f}")
+            m, s = get_val(rel, 'scale_invariant.spearman')
+            print(f"  Spearman: {fmt(m, s)}")
             
-            silog_mean = get_nested_value(rel, 'scale_invariant.silog.mean')
-            silog_std = get_nested_value(rel, 'scale_invariant.silog.std')
-            if silog_mean is not None:
-                print(f"  SILog: {silog_mean:.4f} ± {silog_std:.4f}" if silog_std is not None else f"  SILog: {silog_mean:.4f}")
+            m, s = get_val(rel, 'scale_invariant.silog')
+            print(f"  SILog: {fmt(m, s)}")
         
         if 'absolute' in self.results:
             print("\n[절대 깊이 모델 (DA3-Metric)]")
             abs_ = self.results['absolute']
             
-            abs_rel_mean = get_nested_value(abs_, 'direct_comparison.abs_rel.mean')
-            abs_rel_std = get_nested_value(abs_, 'direct_comparison.abs_rel.std')
-            if abs_rel_mean is not None:
-                print(f"  AbsRel: {abs_rel_mean:.4f} ± {abs_rel_std:.4f}" if abs_rel_std is not None else f"  AbsRel: {abs_rel_mean:.4f}")
+            m, s = get_val(abs_, 'direct_comparison.abs_rel')
+            print(f"  AbsRel: {fmt(m, s)}")
             
-            rmse_mean = get_nested_value(abs_, 'direct_comparison.rmse.mean')
-            rmse_std = get_nested_value(abs_, 'direct_comparison.rmse.std')
-            if rmse_mean is not None:
-                print(f"  RMSE: {rmse_mean:.2f} ± {rmse_std:.2f} mm" if rmse_std is not None else f"  RMSE: {rmse_mean:.2f} mm")
+            m, s = get_val(abs_, 'direct_comparison.rmse')
+            print(f"  RMSE: {fmt(m, s, ' mm')}")
             
-            delta_mean = get_nested_value(abs_, 'direct_comparison.delta_1.mean')
-            delta_std = get_nested_value(abs_, 'direct_comparison.delta_1.std')
-            if delta_mean is not None:
-                print(f"  δ1: {delta_mean:.4f} ± {delta_std:.4f}" if delta_std is not None else f"  δ1: {delta_mean:.4f}")
+            m, s = get_val(abs_, 'direct_comparison.delta_1')
+            print(f"  δ1: {fmt(m, s)}")
+            
+            m, s = get_val(abs_, 'scale_invariant.spearman')
+            print(f"  Spearman: {fmt(m, s)}")
+            
+            m, s = get_val(abs_, 'scale_invariant.silog')
+            print(f"  SILog: {fmt(m, s)}")
         
         if 'comparison' in self.results:
             print("\n[모델 비교]")
             comp = self.results['comparison']['summary']
             
-            def format_value(val):
-                """값을 안전하게 포맷"""
-                if val is None:
-                    return "N/A"
-                try:
-                    return f"{val:.4f}"
-                except (TypeError, ValueError):
-                    return str(val)
+            rel_abs = fmt_comp(comp.get('relative_abs_rel'))
+            abs_abs = fmt_comp(comp.get('absolute_abs_rel'))
+            print(f"  AbsRel  - 상대: {rel_abs}, 절대: {abs_abs}")
             
-            rel_abs_rel = comp.get('relative_abs_rel')
-            abs_abs_rel = comp.get('absolute_abs_rel')
-            rel_rmse = comp.get('relative_rmse')
-            abs_rmse = comp.get('absolute_rmse')
-            rel_delta = comp.get('relative_delta_1')
-            abs_delta = comp.get('absolute_delta_1')
+            rel_rmse = fmt_comp(comp.get('relative_rmse'), 2, ' mm')
+            abs_rmse = fmt_comp(comp.get('absolute_rmse'), 2, ' mm')
+            print(f"  RMSE    - 상대: {rel_rmse}, 절대: {abs_rmse}")
             
-            if rel_abs_rel is not None or abs_abs_rel is not None:
-                print(f"  상대 모델 AbsRel: {format_value(rel_abs_rel)}")
-                print(f"  절대 모델 AbsRel: {format_value(abs_abs_rel)}")
-            if rel_rmse is not None or abs_rmse is not None:
-                print(f"  상대 모델 RMSE: {format_value(rel_rmse)} mm")
-                print(f"  절대 모델 RMSE: {format_value(abs_rmse)} mm")
-            if rel_delta is not None or abs_delta is not None:
-                print(f"  상대 모델 δ1: {format_value(rel_delta)}")
-                print(f"  절대 모델 δ1: {format_value(abs_delta)}")
+            rel_d1 = fmt_comp(comp.get('relative_delta_1'))
+            abs_d1 = fmt_comp(comp.get('absolute_delta_1'))
+            print(f"  δ1      - 상대: {rel_d1}, 절대: {abs_d1}")
 
 
 def main():
@@ -682,54 +673,23 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Depth 모델 평가")
-    parser.add_argument(
-        "--zed_dir",
-        type=str,
-        default="./depth_output_zed/not_move",
-        help="ZED depth 디렉토리"
-    )
-    parser.add_argument(
-        "--rel_dir",
-        type=str,
-        default="./depth_output_rel/not_move",
-        help="상대 깊이 결과 디렉토리"
-    )
-    parser.add_argument(
-        "--abs_dir",
-        type=str,
-        default="./depth_output_abs/not_move",
-        help="절대 깊이 결과 디렉토리"
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="./evaluation_results/not_move",
-        help="결과 저장 디렉토리"
-    )
-    # 기본값은 __init__의 기본값과 동일하게 유지 (일관성 유지)
-    parser.add_argument(
-        "--confidence_threshold",
-        type=float,
-        default=0.0,  # __init__의 기본값과 동일
-        help="ZED confidence threshold (0-100, 기본값: 0.0)"
-    )
-    parser.add_argument(
-        "--max_distance",
-        type=float,
-        default=20000.0,  # __init__의 기본값과 동일
-        help="최대 거리 (mm, 기본값: 20000.0)"
-    )
-    parser.add_argument(
-        "--min_distance",
-        type=float,
-        default=200.0,  # __init__의 기본값과 동일
-        help="최소 거리 (mm, 기본값: 200.0)"
-    )
+    parser.add_argument("--zed_dir", type=str, default="./depth_output_zed/move",
+                        help="ZED depth 디렉토리")
+    parser.add_argument("--rel_dir", type=str, default="./depth_output_rel/move",
+                        help="상대 깊이 결과 디렉토리")
+    parser.add_argument("--abs_dir", type=str, default="./depth_output_abs/move",
+                        help="절대 깊이 결과 디렉토리")
+    parser.add_argument("--output_dir", type=str, default="./evaluation_results/move",
+                        help="결과 저장 디렉토리")
+    parser.add_argument("--confidence_threshold", type=float, default=0.0,
+                        help="ZED confidence threshold (0-100)")
+    parser.add_argument("--max_distance", type=float, default=20000.0,
+                        help="최대 거리 (mm)")
+    parser.add_argument("--min_distance", type=float, default=200.0,
+                        help="최소 거리 (mm)")
     
     args = parser.parse_args()
     
-    # 평가 프레임워크 초기화
-    # 명령줄 인자가 제공되면 args.* 사용, 없으면 argparse의 default 사용
     framework = DepthEvaluationFramework(
         zed_dir=args.zed_dir,
         rel_dir=args.rel_dir,
@@ -739,15 +699,12 @@ def main():
         min_distance=args.min_distance
     )
     
-    # 평가 실행
     framework.evaluate_all()
-    
-    # 결과 출력
     framework.print_summary()
     framework.save_results(args.output_dir)
-    print("\n평가 완료!")
+    
+    print("\n✓ 평가 완료!")
 
 
 if __name__ == "__main__":
     main()
-
