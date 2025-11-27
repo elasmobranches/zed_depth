@@ -93,16 +93,9 @@ python save_depth.py \
 ```
 
 
-### 4. `analyze_confidence.py` - Confidence Map 분석 
+### 4. `confidence.py` 
 
-ZED Confidence map을 분석하고 시각화하는 스크립트입니다.
-
-#### 주요 기능
-- Confidence map 통계 계산 (min, max, mean, median, std)
-- 임계값별 유효 픽셀 비율 계산
-- Confidence 히스토그램 및 히트맵 시각화
-- JSON 형식으로 통계 저장
-- Confidence로 인한 filtering을 통해 유효한 픽셀끼리만 비교 가능합니다.
+각 픽셀의 confidence 값에 따른 비율 분석
 
 ### 5. `evaluate_depth_models.py` - 모델 평가
 
@@ -112,7 +105,31 @@ ZED Confidence map을 분석하고 시각화하는 스크립트입니다.
 - ZED 깊이 맵을 Ground Truth로 사용
 - Monocular 및 Metric 모델의 성능 평가
 - 거리별 성능 분석 (0-1m, 1-2m, 2-5m, 5-10m, 10-20m)
-- 다양한 평가 메트릭 계산 (AbsRel, RMSE, MAE, Delta accuracy, SILog, Spearman 등)
+- Confidence별 성능 분석 (0-20, 20-40, 40-60, 60-80, 80-100)
+- 다양한 평가 메트릭 계산 (AbsRel, RMSE, MAE, Delta 1/2/3, SILog, Spearman 등)
+- Confidence threshold 기반 유효 픽셀 필터링
+
+#### 사용법
+
+```bash
+python evaluate_depth_models.py \
+    --zed_dir ./depth_output_zed/move \
+    --rel_dir ./depth_output_rel/move \
+    --abs_dir ./depth_output_abs/move \
+    --output_dir ./evaluation_results/move_test_10 \
+    --confidence_threshold 10 \
+    --max_distance 20000.0 \
+    --min_distance 200.0
+```
+
+#### 인자 설명
+- `--zed_dir`: ZED depth 디렉토리 (필수)
+- `--rel_dir`: 상대 깊이(Monocular) 결과 디렉토리 (필수)
+- `--abs_dir`: 절대 깊이(Metric) 결과 디렉토리 (필수)
+- `--output_dir`: 결과 저장 디렉토리 (기본값: `./evaluation_results/move_test_10`)
+- `--confidence_threshold`: ZED confidence threshold (0-100, 기본값: 10)
+- `--max_distance`: 최대 거리 mm (기본값: 20000.0)
+- `--min_distance`: 최소 거리 mm (기본값: 200.0)
 
 ### 6. `visualize_evaluation.py` - 결과 시각화 및 리포트 생성
 
@@ -121,5 +138,23 @@ ZED Confidence map을 분석하고 시각화하는 스크립트입니다.
 #### 주요 기능
 - 요약 테이블 및 상세 CSV 파일 생성
 - 마크다운 형식의 평가 리포트 생성
-- 거리별 성능 분석 차트 생성
+- 거리별 성능 분석 차트 생성 (RMSE, AbsRel, Delta, SILog 등)
+- Confidence별 성능 분석 차트 생성
 - Delta Accuracy 비교 차트 생성
+- 모델 간 비교 분석
+
+#### 사용법
+
+```bash
+python visualize_evaluation.py \
+    --results_path ./evaluation_results/move_test_10/evaluation_results.json
+```
+
+#### 생성되는 파일
+- `evaluation_report.md`: 종합 평가 리포트
+- `summary_table.csv`: 모델별 요약 테이블
+- `overall_metrics.csv`: 전체 메트릭 요약
+- `distance_metrics_detailed.csv`: 거리별 상세 메트릭
+- `delta_accuracy_comparison.png`: Delta accuracy 비교 차트
+- `distance_analysis.png`: 거리별 성능 분석 차트
+- `confidence_analysis.png`: Confidence별 성능 분석 차트

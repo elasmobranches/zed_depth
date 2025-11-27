@@ -29,12 +29,20 @@ class DepthEvaluationFramework:
         (10000, 20000)  # 10-20m
     ]
     
+    CONFIDENCE_RANGES = [
+        (0, 20),      # 매우 낮음
+        (20, 40),     # 낮음
+        (40, 60),     # 중간
+        (60, 80),     # 높음
+        (80, 100)     # 매우 높음
+    ]
+    
     def __init__(
         self,
         zed_dir: str,
         rel_dir: str,
         abs_dir: str,
-        confidence_threshold: float = 0.0,
+        confidence_threshold: float = 0.0,  # Note: main()에서는 argparse의 default=30이 사용됨
         max_distance: float = 20000.0,  # mm
         min_distance: float = 200.0,  # mm
     ):
@@ -44,6 +52,7 @@ class DepthEvaluationFramework:
             rel_dir: 상대 깊이 추정 결과 디렉토리
             abs_dir: 절대 깊이 추정 결과 디렉토리
             confidence_threshold: ZED confidence threshold (0.0-100.0)
+                                 (main() 함수 실행 시 기본값: 30.0)
             max_distance: 최대 거리 (mm)
             min_distance: 최소 거리 (mm)
         """
@@ -250,10 +259,17 @@ class DepthEvaluationFramework:
         self,
         pred: np.ndarray,
         gt: np.ndarray,
-        mask: np.ndarray
+        mask: np.ndarray,
+        zed_confidence: Optional[np.ndarray] = None
     ) -> Dict[str, Dict]:
         """거리별 성능 분석 (모든 메트릭 포함)"""
         results = {}
+        
+        # 전체 유효 픽셀 수 계산
+        total_valid_pixels = int(mask.sum())
+        
+        # Confidence 무관한 base mask (거리만 체크)
+        base_mask = (gt > self.min_distance) & (gt < self.max_distance)
         
         for min_dist, max_dist in self.DISTANCE_RANGES:
             range_mask = mask & (gt >= min_dist) & (gt < max_dist)
@@ -263,6 +279,20 @@ class DepthEvaluationFramework:
             
             if num_pixels < 100:  # 충분한 픽셀이 없으면 스킵
                 continue
+            
+            # 픽셀 비율 계산 (전체 유효 픽셀 대비)
+            pixel_ratio = num_pixels / total_valid_pixels if total_valid_pixels > 0 else 0.0
+            
+            # Confidence로 필터링된 비율 계산
+            filtered_ratio = 0.0
+            if zed_confidence is not None:
+                # 이 거리 범위의 원래 픽셀 수 (confidence 무관)
+                base_range_mask = base_mask & (gt >= min_dist) & (gt < max_dist)
+                base_num_pixels = int(base_range_mask.sum())
+                
+                if base_num_pixels > 0:
+                    # Confidence로 제외된 비율
+                    filtered_ratio = (base_num_pixels - num_pixels) / base_num_pixels
             
             # 모든 메트릭 계산
             results[range_key] = {
@@ -281,7 +311,61 @@ class DepthEvaluationFramework:
                 'spearman': self.compute_spearman_correlation(pred, gt, range_mask),
                 
                 # 메타 정보
-                'num_pixels': num_pixels
+                'num_pixels': num_pixels,
+                'valid_pixels': num_pixels,  # Visualizer 호환성을 위해 동일한 값 저장
+                'pixel_ratio': pixel_ratio,
+                'filtered_ratio': filtered_ratio  # Confidence로 제외된 비율
+            }
+        
+        return results
+    
+    def analyze_by_confidence_ranges(
+        self,
+        pred: np.ndarray,
+        gt: np.ndarray,
+        confidence: Optional[np.ndarray],
+        base_mask: np.ndarray
+    ) -> Dict[str, Dict]:
+        """Confidence 범위별 성능 분석"""
+        if confidence is None:
+            return {}
+        
+        results = {}
+        
+        # 전체 유효 픽셀 수 계산
+        total_valid_pixels = int(base_mask.sum())
+        
+        for min_conf, max_conf in self.CONFIDENCE_RANGES:
+            conf_mask = base_mask & (confidence >= min_conf) & (confidence < max_conf)
+            num_pixels = int(conf_mask.sum())
+            
+            range_key = f"{min_conf}-{max_conf}"
+            
+            if num_pixels < 100:  # 충분한 픽셀이 없으면 스킵
+                continue
+            
+            # 픽셀 비율 계산
+            pixel_ratio = num_pixels / total_valid_pixels if total_valid_pixels > 0 else 0.0
+            
+            # 모든 메트릭 계산
+            results[range_key] = {
+                # 기본 메트릭
+                'abs_rel': self.compute_abs_rel(pred, gt, conf_mask),
+                'rmse': self.compute_rmse(pred, gt, conf_mask),
+                'mae': self.compute_mae(pred, gt, conf_mask),
+                
+                # Delta accuracies
+                'delta_1': self.compute_delta_accuracy(pred, gt, conf_mask, 1.25),
+                'delta_2': self.compute_delta_accuracy(pred, gt, conf_mask, 1.25**2),
+                'delta_3': self.compute_delta_accuracy(pred, gt, conf_mask, 1.25**3),
+                
+                # Scale-invariant 메트릭
+                'silog': self.compute_silog(pred, gt, conf_mask),
+                'spearman': self.compute_spearman_correlation(pred, gt, conf_mask),
+                
+                # 메타 정보
+                'num_pixels': num_pixels,
+                'pixel_ratio': pixel_ratio
             }
         
         return results
@@ -292,7 +376,8 @@ class DepthEvaluationFramework:
         self,
         rel_depth: np.ndarray,
         zed_depth: np.ndarray,
-        valid_mask: np.ndarray
+        valid_mask: np.ndarray,
+        zed_confidence: Optional[np.ndarray] = None
     ) -> Tuple[Dict, np.ndarray]:
         """상대 깊이 모델 평가"""
         
@@ -337,8 +422,14 @@ class DepthEvaluationFramework:
         
         # 4. 거리별 분석 (모든 메트릭 포함)
         metrics['distance_analysis'] = self.analyze_by_distance_ranges(
-            aligned_rel, zed_depth, valid_mask
+            aligned_rel, zed_depth, valid_mask, zed_confidence
         )
+        
+        # 5. Confidence별 분석 (confidence map이 있을 때만)
+        if zed_confidence is not None:
+            metrics['confidence_analysis'] = self.analyze_by_confidence_ranges(
+                aligned_rel, zed_depth, zed_confidence, valid_mask
+            )
         
         return metrics, aligned_rel
     
@@ -346,7 +437,8 @@ class DepthEvaluationFramework:
         self,
         abs_depth: np.ndarray,
         zed_depth: np.ndarray,
-        valid_mask: np.ndarray
+        valid_mask: np.ndarray,
+        zed_confidence: Optional[np.ndarray] = None
     ) -> Tuple[Dict, np.ndarray]:
         """절대 깊이 모델 평가"""
         
@@ -388,8 +480,14 @@ class DepthEvaluationFramework:
         
         # 4. 거리별 분석 (모든 메트릭 포함)
         metrics['distance_analysis'] = self.analyze_by_distance_ranges(
-            abs_depth_resized, zed_depth, valid_mask
+            abs_depth_resized, zed_depth, valid_mask, zed_confidence
         )
+        
+        # 5. Confidence별 분석 (confidence map이 있을 때만)
+        if zed_confidence is not None:
+            metrics['confidence_analysis'] = self.analyze_by_confidence_ranges(
+                abs_depth_resized, zed_depth, zed_confidence, valid_mask
+            )
         
         return metrics, abs_depth_resized
     
@@ -456,7 +554,7 @@ class DepthEvaluationFramework:
             # 상대 깊이 평가
             if rel_depth is not None:
                 rel_metrics, _ = self.evaluate_relative_depth_model(
-                    rel_depth, zed_depth, valid_mask
+                    rel_depth, zed_depth, valid_mask, zed_confidence
                 )
                 rel_metrics['image_idx'] = idx
                 all_rel_metrics.append(rel_metrics)
@@ -464,7 +562,7 @@ class DepthEvaluationFramework:
             # 절대 깊이 평가
             if abs_depth is not None:
                 abs_metrics, _ = self.evaluate_metric_depth_model(
-                    abs_depth, zed_depth, valid_mask
+                    abs_depth, zed_depth, valid_mask, zed_confidence
                 )
                 abs_metrics['image_idx'] = idx
                 all_abs_metrics.append(abs_metrics)
@@ -679,9 +777,9 @@ def main():
                         help="상대 깊이 결과 디렉토리")
     parser.add_argument("--abs_dir", type=str, default="./depth_output_abs/move",
                         help="절대 깊이 결과 디렉토리")
-    parser.add_argument("--output_dir", type=str, default="./evaluation_results/move",
+    parser.add_argument("--output_dir", type=str, default="./evaluation_results/move_test_10",
                         help="결과 저장 디렉토리")
-    parser.add_argument("--confidence_threshold", type=float, default=0.0,
+    parser.add_argument("--confidence_threshold", type=float, default=10,
                         help="ZED confidence threshold (0-100)")
     parser.add_argument("--max_distance", type=float, default=20000.0,
                         help="최대 거리 (mm)")
@@ -703,7 +801,8 @@ def main():
     framework.print_summary()
     framework.save_results(args.output_dir)
     
-    print("\n✓ 평가 완료!")
+    print("\n✓ 평가 완료!, threshold: ", args.confidence_threshold)
+    print("✓ 결과 저장: ", args.output_dir)
 
 
 if __name__ == "__main__":

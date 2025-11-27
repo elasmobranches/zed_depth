@@ -20,6 +20,7 @@ class EvaluationVisualizer:
     
     # 클래스 상수
     DISTANCE_RANGES = ['0.0-1.0m', '1.0-2.0m', '2.0-5.0m', '5.0-10.0m', '10.0-20.0m']
+    CONFIDENCE_RANGES = ['0-20', '20-40', '40-60', '60-80', '80-100']
     METRICS = ['abs_rel', 'rmse', 'mae', 'delta_1', 'delta_2', 'delta_3', 'silog']
     
     def __init__(self, results_path: str):
@@ -145,12 +146,6 @@ class EvaluationVisualizer:
                 
                 if mean_val is not None:
                     has_data = True
-            
-            # valid_pixels 정보
-            valid_pixels = self._get_nested_value(
-                result, f'distance_analysis.{dist_range}.valid_pixels'
-            )
-            row['valid_pixels'] = valid_pixels
             
             if has_data:
                 data.append(row)
@@ -328,6 +323,99 @@ class EvaluationVisualizer:
         print(f"✓ 거리별 분석 차트 저장: {self.output_dir / 'distance_analysis.png'}")
         plt.close()
     
+    def plot_confidence_analysis(self):
+        """Confidence별 성능 분석 차트"""
+        # Confidence 데이터가 있는지 확인
+        has_conf_data = False
+        if 'relative' in self.results:
+            for conf_range in self.CONFIDENCE_RANGES:
+                val = self._get_nested_value(
+                    self.results['relative'], f'confidence_analysis.{conf_range}.rmse.mean'
+                )
+                if val is not None:
+                    has_conf_data = True
+                    break
+        
+        if not has_conf_data:
+            print("  ⚠ Confidence 분석 데이터가 없습니다. 차트 생성을 건너뜁니다.")
+            return
+        
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        
+        x_conf = np.arange(len(self.CONFIDENCE_RANGES))
+        width = 0.35
+        
+        # 데이터 추출
+        rel_data = {metric: [] for metric in ['rmse', 'abs_rel', 'delta_1', 'pixel_ratio']}
+        abs_data = {metric: [] for metric in ['rmse', 'abs_rel', 'delta_1', 'pixel_ratio']}
+        
+        for conf_range in self.CONFIDENCE_RANGES:
+            if 'relative' in self.results:
+                rel = self.results['relative']
+                for metric in ['rmse', 'abs_rel', 'delta_1', 'pixel_ratio']:
+                    val = self._get_nested_value(rel, f'confidence_analysis.{conf_range}.{metric}.mean', 0)
+                    rel_data[metric].append(val if val is not None else 0)
+            
+            if 'absolute' in self.results:
+                abs_ = self.results['absolute']
+                for metric in ['rmse', 'abs_rel', 'delta_1', 'pixel_ratio']:
+                    val = self._get_nested_value(abs_, f'confidence_analysis.{conf_range}.{metric}.mean', 0)
+                    abs_data[metric].append(val if val is not None else 0)
+        
+        # 1. Confidence별 RMSE 비교
+        if rel_data['rmse'] and abs_data['rmse']:
+            axes[0, 0].bar(x_conf - width/2, rel_data['rmse'], width, alpha=0.7, color='steelblue', label='Monocular')
+            axes[0, 0].bar(x_conf + width/2, abs_data['rmse'], width, alpha=0.7, color='coral', label='Metric')
+            axes[0, 0].set_xlabel('Confidence Range')
+            axes[0, 0].set_ylabel('RMSE (mm)')
+            axes[0, 0].set_title('RMSE by Confidence', fontsize=12)
+            axes[0, 0].set_xticks(x_conf)
+            axes[0, 0].set_xticklabels(self.CONFIDENCE_RANGES, rotation=45, ha='right')
+            axes[0, 0].legend()
+            axes[0, 0].grid(True, alpha=0.3, axis='y')
+        
+        # 2. Confidence별 AbsRel 비교
+        if rel_data['abs_rel'] and abs_data['abs_rel']:
+            axes[0, 1].bar(x_conf - width/2, rel_data['abs_rel'], width, alpha=0.7, color='steelblue', label='Monocular')
+            axes[0, 1].bar(x_conf + width/2, abs_data['abs_rel'], width, alpha=0.7, color='coral', label='Metric')
+            axes[0, 1].set_xlabel('Confidence Range')
+            axes[0, 1].set_ylabel('AbsRel')
+            axes[0, 1].set_title('AbsRel by Confidence', fontsize=12)
+            axes[0, 1].set_xticks(x_conf)
+            axes[0, 1].set_xticklabels(self.CONFIDENCE_RANGES, rotation=45, ha='right')
+            axes[0, 1].legend()
+            axes[0, 1].grid(True, alpha=0.3, axis='y')
+        
+        # 3. Confidence별 Delta-1 비교
+        if rel_data['delta_1'] and abs_data['delta_1']:
+            axes[1, 0].bar(x_conf - width/2, rel_data['delta_1'], width, alpha=0.7, color='steelblue', label='Monocular')
+            axes[1, 0].bar(x_conf + width/2, abs_data['delta_1'], width, alpha=0.7, color='coral', label='Metric')
+            axes[1, 0].set_xlabel('Confidence Range')
+            axes[1, 0].set_ylabel('δ1 Accuracy')
+            axes[1, 0].set_title('δ1 by Confidence', fontsize=12)
+            axes[1, 0].set_xticks(x_conf)
+            axes[1, 0].set_xticklabels(self.CONFIDENCE_RANGES, rotation=45, ha='right')
+            axes[1, 0].legend()
+            axes[1, 0].grid(True, alpha=0.3, axis='y')
+            axes[1, 0].set_ylim([0, 1])
+        
+        # 4. Confidence별 픽셀 분포 (pixel_ratio)
+        if rel_data['pixel_ratio']:
+            # 비율을 퍼센트로 변환
+            pixel_ratios = [r * 100 if r else 0 for r in rel_data['pixel_ratio']]
+            axes[1, 1].bar(x_conf, pixel_ratios, alpha=0.7, color='green')
+            axes[1, 1].set_xlabel('Confidence Range')
+            axes[1, 1].set_ylabel('Pixel Ratio (%)')
+            axes[1, 1].set_title('Pixel Distribution by Confidence', fontsize=12)
+            axes[1, 1].set_xticks(x_conf)
+            axes[1, 1].set_xticklabels(self.CONFIDENCE_RANGES, rotation=45, ha='right')
+            axes[1, 1].grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        plt.savefig(self.output_dir / 'confidence_analysis.png', dpi=300, bbox_inches='tight')
+        print(f"✓ Confidence 분석 차트 저장: {self.output_dir / 'confidence_analysis.png'}")
+        plt.close()
+    
     def generate_summary_table(self):
         """요약 테이블 생성"""
         data = []
@@ -445,11 +533,10 @@ class EvaluationVisualizer:
         if data:
             df = pd.DataFrame(data)
             
-            # 컬럼 순서 정리
+            # 컬럼 순서 정리 (valid_pixels, pixel_ratio 제외)
             column_order = ['distance_range', 'model']
             for metric in self.METRICS:
                 column_order.extend([f'{metric}_mean', f'{metric}_std'])
-            column_order.append('valid_pixels')
             
             # 존재하는 컬럼만 선택
             existing_columns = [col for col in column_order if col in df.columns]
@@ -510,10 +597,96 @@ class EvaluationVisualizer:
         
         # 3. 거리별 분석 요약
         report.append("## 3. 거리별 성능 분석\n")
+        
+        # 거리별 픽셀 분포 정보 추가
+        if 'relative' in self.results or 'absolute' in self.results:
+            report.append("### 거리별 픽셀 분포 (전체 유효 픽셀 대비)\n")
+            
+            # Monocular 모델 또는 Metric 모델 중 하나의 분포 정보 사용 (둘 다 동일해야 함)
+            model_key = 'relative' if 'relative' in self.results else 'absolute'
+            result = self.results[model_key]
+            
+            # filtered_ratio 데이터가 있는지 확인
+            has_filtered_ratio = False
+            for dist_range in self.DISTANCE_RANGES:
+                filtered_ratio = self._get_nested_value(
+                    result, f'distance_analysis.{dist_range}.filtered_ratio.mean'
+                )
+                if filtered_ratio is not None and filtered_ratio > 0:
+                    has_filtered_ratio = True
+                    break
+            
+            if has_filtered_ratio:
+                report.append("| 거리 범위 | 픽셀 비율 | Confidence로 제외된 비율 |\n")
+                report.append("|-----------|----------|-------------------------|\n")
+                
+                for dist_range in self.DISTANCE_RANGES:
+                    pixel_ratio = self._get_nested_value(
+                        result, f'distance_analysis.{dist_range}.pixel_ratio.mean'
+                    )
+                    filtered_ratio = self._get_nested_value(
+                        result, f'distance_analysis.{dist_range}.filtered_ratio.mean'
+                    )
+                    if pixel_ratio is not None:
+                        if filtered_ratio is not None:
+                            report.append(f"| {dist_range} | {pixel_ratio*100:.2f}% | {filtered_ratio*100:.2f}% |\n")
+                        else:
+                            report.append(f"| {dist_range} | {pixel_ratio*100:.2f}% | N/A |\n")
+            else:
+                report.append("| 거리 범위 | 픽셀 비율 |\n")
+                report.append("|-----------|----------|\n")
+                
+                for dist_range in self.DISTANCE_RANGES:
+                    pixel_ratio = self._get_nested_value(
+                        result, f'distance_analysis.{dist_range}.pixel_ratio.mean'
+                    )
+                    if pixel_ratio is not None:
+                        report.append(f"| {dist_range} | {pixel_ratio*100:.2f}% |\n")
+            
+            report.append("\n")
+        
         report.append("상세 데이터는 `distance_metrics_detailed.csv` 참조\n\n")
         
-        # 4. 모델 비교
-        report.append("## 4. 모델 비교 요약\n")
+        # 4. Confidence별 분석 요약
+        report.append("## 4. Confidence별 성능 분석\n")
+        
+        # Confidence 데이터가 있는지 확인
+        has_conf_data = False
+        if 'relative' in self.results or 'absolute' in self.results:
+            model_key = 'relative' if 'relative' in self.results else 'absolute'
+            result = self.results[model_key]
+            
+            for conf_range in self.CONFIDENCE_RANGES:
+                if self._get_nested_value(result, f'confidence_analysis.{conf_range}.pixel_ratio.mean') is not None:
+                    has_conf_data = True
+                    break
+        
+        if has_conf_data:
+            # Confidence별 픽셀 분포 정보
+            report.append("### Confidence별 픽셀 분포 (전체 유효 픽셀 대비)\n")
+            model_key = 'relative' if 'relative' in self.results else 'absolute'
+            result = self.results[model_key]
+            
+            report.append("| Confidence 범위 | 픽셀 비율 |\n")
+            report.append("|----------------|----------|\n")
+            
+            for conf_range in self.CONFIDENCE_RANGES:
+                pixel_ratio = self._get_nested_value(
+                    result, f'confidence_analysis.{conf_range}.pixel_ratio.mean'
+                )
+                if pixel_ratio is not None:
+                    report.append(f"| {conf_range} | {pixel_ratio*100:.2f}% |\n")
+            
+            report.append("\n")
+            
+            # Confidence별 성능 요약
+            report.append("### Confidence가 높을수록 성능이 좋은가?\n")
+            report.append("Confidence 분석 차트(`confidence_analysis.png`)를 참조하세요.\n\n")
+        else:
+            report.append("Confidence map이 없어 분석을 수행하지 않았습니다.\n\n")
+        
+        # 5. 모델 비교
+        report.append("## 5. 모델 비교 요약\n")
         if 'relative' in self.results and 'absolute' in self.results:
             rel = self.results['relative']
             abs_ = self.results['absolute']
@@ -544,6 +717,7 @@ class EvaluationVisualizer:
         # 차트 생성
         self.plot_metric_comparison()
         self.plot_distance_analysis()
+        self.plot_confidence_analysis()
         
         # 테이블 생성
         self.generate_summary_table()
@@ -563,6 +737,7 @@ class EvaluationVisualizer:
         output_files = [
             'delta_accuracy_comparison.png',
             'distance_analysis.png',
+            'confidence_analysis.png',
             'summary_table.csv',
             'evaluation_report.md',
             'overall_metrics.csv',
@@ -587,7 +762,7 @@ def main():
     parser.add_argument(
         "--results_path",
         type=str,
-        default="./evaluation_results/move/evaluation_results.json",
+        default="./evaluation_results/move_test_10/evaluation_results.json",
         help="evaluation_results.json 파일 경로"
     )
     
