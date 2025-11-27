@@ -134,7 +134,7 @@ python visualize_evaluation.py \
 
 ### 기타
 
-#### 3. `save_depth.py` - Depth 추정 및 저장
+#### `save_depth.py` - Depth 추정 및 저장
 
 RGB 이미지에서 깊이를 추정하고 결과를 저장하는 스크립트입니다.
 
@@ -156,6 +156,6 @@ python save_depth.py \
 ```
 
 
-#### 4. `confidence.py` 
+#### `confidence.py` 
 
 각 픽셀의 confidence 값에 따른 비율 분석
