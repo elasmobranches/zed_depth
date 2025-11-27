@@ -10,7 +10,7 @@ huggingface 주소 `https://huggingface.co/depth-anything`
 평가는 **ZED 카메라의 깊이 맵을 Ground Truth**로 사용하여 수행됩니다.
 
 
-### 1. `extract_svo.py` - SVO 파일에서 프레임 추출
+### 1. `extract_svo.py` - SVO 파일에서 녹화
 
 ZED 카메라를 사용하여 실시간으로 영상을 녹화하고 SVO 파일로 저장하는 스크립트입니다.
 
@@ -36,7 +36,7 @@ init_params.camera_fps = 30
 
 녹화 시작:
 ```bash
-python extract_frame.py
+python extract_svo.py
 ```
 
 - Ctrl-C로 종료
@@ -55,7 +55,7 @@ python extract_frame.py
 #### 사용법
 
 ```bash
-python extract_svo.py \
+python extract_frame.py \
     --svo_path ./recordings/zed_20250115_143022.svo2 \
     --output_dir ./depth_output_zed/move \
     --sample_rate 10
@@ -69,35 +69,8 @@ python extract_svo.py \
 #### 중요 사항
 - 녹화 시와 동일한 depth 설정 사용 필수
 
----
 
-## 3. `save_depth.py` - Depth 추정 및 저장
-
-RGB 이미지에서 깊이를 추정하고 결과를 저장하는 스크립트입니다.
-
-#### 주요 기능
-- Depth Anything v3의 두 모델(Monocular, Metric)을 사용하여 깊이 추정
-- 결과를 NumPy 배열(.npy) 및 시각화 이미지(.png) 형식으로 저장
-
-#### 사용법
-
-```bash
-python save_depth.py \
-    --image ./images/ \
-    --output_mono ./depth_output_rel/move \
-    --output_metric ./depth_output_abs/move \
-    --model_mono depth-anything/da3mono-large \
-    --model_metric depth-anything/da3metric-large \
-    --format both \
-    --device cuda
-```
-
-
-### 4. `confidence.py` 
-
-각 픽셀의 confidence 값에 따른 비율 분석
-
-### 5. `evaluate_depth_models.py` - 모델 평가
+### 3. `evaluate_depth_models.py` - 모델 평가
 
 추정된 깊이 맵을 Ground Truth와 비교하여 성능을 평가하는 스크립트입니다.
 
@@ -131,7 +104,7 @@ python evaluate_depth_models.py \
 - `--max_distance`: 최대 거리 mm (기본값: 20000.0)
 - `--min_distance`: 최소 거리 mm (기본값: 200.0)
 
-### 6. `visualize_evaluation.py` - 결과 시각화 및 리포트 생성
+### 4. `visualize_evaluation.py` - 결과 시각화 및 리포트 생성
 
 평가 결과를 시각화하고 종합 리포트를 생성하는 스크립트입니다.
 
@@ -158,3 +131,31 @@ python visualize_evaluation.py \
 - `delta_accuracy_comparison.png`: Delta accuracy 비교 차트
 - `distance_analysis.png`: 거리별 성능 분석 차트
 - `confidence_analysis.png`: Confidence별 성능 분석 차트
+
+### 기타
+
+#### 3. `save_depth.py` - Depth 추정 및 저장
+
+RGB 이미지에서 깊이를 추정하고 결과를 저장하는 스크립트입니다.
+
+#### 주요 기능
+- Depth Anything v3의 두 모델(Monocular, Metric)을 사용하여 깊이 추정
+- 결과를 NumPy 배열(.npy) 및 시각화 이미지(.png) 형식으로 저장
+
+#### 사용법
+
+```bash
+python save_depth.py \
+    --image ./images/ \
+    --output_mono ./depth_output_rel/move \
+    --output_metric ./depth_output_abs/move \
+    --model_mono depth-anything/da3mono-large \
+    --model_metric depth-anything/da3metric-large \
+    --format both \
+    --device cuda
+```
+
+
+#### 4. `confidence.py` 
+
+각 픽셀의 confidence 값에 따른 비율 분석
