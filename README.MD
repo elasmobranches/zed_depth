@@ -132,6 +132,79 @@ python visualize_evaluation.py \
 - `distance_analysis.png`: 거리별 성능 분석 차트
 - `confidence_analysis.png`: Confidence별 성능 분석 차트
 
+## 추가 도구
+
+### 5. `aruco_validation/` - ArUco 마커 기반 Depth 검증
+
+ZED 카메라의 depth 정확도를 ArUco 마커를 사용하여 검증하는 도구입니다.
+
+#### 주요 기능
+- ArUco 마커 자동 검출 및 depth 측정
+- 실제 거리와 ZED 측정 거리 비교
+- 오차율 자동 계산 및 통계 분석
+- 실시간 시각화 (오차에 따른 색상 표시)
+- 측정 데이터 CSV 저장
+
+#### 사용법
+
+1. **마커 배치 및 설정**
+   ```yaml
+   # marker_config.yaml 수정
+   markers:
+     0: 1.0    # ID 0 = 1m
+     1: 2.0    # ID 1 = 2m
+     2: 3.0    # ID 2 = 3m
+     3: 5.0    # ID 3 = 5m
+   ```
+
+2. **검증 실행**
+   ```bash
+   cd aruco_validation
+   python capture_aruco.py
+   ```
+
+3. **키보드 조작**
+   - `s` - 현재 프레임 저장
+   - `q` - 종료
+
+#### 결과 파일
+- `results/aruco_validation_YYYYMMDD_HHMMSS.csv` - 측정 데이터
+- `results/capture_YYYYMMDD_HHMMSS.jpg` - 캡처 이미지
+
+자세한 내용은 `aruco_validation/README.md`를 참조하세요.
+
+### 6. `tools/` - 분석 및 측정 도구
+
+#### GPU 사용률 측정 (`measure_gpu.py`)
+
+다양한 시나리오에서 GPU 사용률을 측정하는 도구입니다.
+
+```bash
+cd tools
+python measure_gpu.py --name "Scenario Name"
+# Enter 키 누른 후 측정 시작
+# Ctrl+C로 종료
+```
+
+결과는 `gpu_measurements.csv`에 저장됩니다.
+
+#### Depth 이미지 비교 (`compare_depth_images.py`)
+
+두 개의 depth map을 ground truth와 비교하여 메트릭을 계산합니다.
+
+```bash
+cd tools
+python compare_depth_images.py \
+    --pred1 ../depth_output_rel/origin/depth_npy/000000_depth.npy \
+    --pred2 ../depth_output_abs/origin/depth_npy/000000_depth.npy \
+    --gt ../depth_output_zed/origin/depth_npy/000000.npy \
+    --name1 "Monocular" \
+    --name2 "Metric" \
+    --output ../comparison_results
+```
+
+자세한 내용은 `tools/README.md`를 참조하세요.
+
 ### 기타
 
 #### `save_depth.py` - Depth 추정 및 저장
